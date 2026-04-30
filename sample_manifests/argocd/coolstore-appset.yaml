@@ -16,6 +16,7 @@ spec:
   sourceRepos:
     - 'https://github.com/sansow/mettel.git'
   destinations:
+    - { namespace: 'default',          server: https://kubernetes.default.svc }
     - { namespace: 'coolstore',        server: https://kubernetes.default.svc }
     - { namespace: 'coolstore-cicd',   server: https://kubernetes.default.svc }
     - { namespace: 'coolstore-virt',   server: https://kubernetes.default.svc }
