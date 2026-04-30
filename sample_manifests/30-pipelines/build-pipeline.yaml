@@ -1,0 +1,91 @@
+# =============================================================================
+# Tekton Pipeline that builds a CoolStore service, scans it with ACS,
+# pushes a signed image to Quay, and updates the GitOps repo with the new digest.
+# Pattern adapted from openshift/pipelines-tutorial.
+# =============================================================================
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: coolstore-build
+  namespace: coolstore-cicd
+spec:
+  params:
+    - name: git-url
+      description: source repo (e.g. coolstore catalog)
+    - name: git-revision
+      default: main
+    - name: image-name
+      description: e.g. quay.io/coolstore/catalog
+    - name: gitops-repo
+      description: GitOps repo to bump (manifests live here)
+  workspaces:
+    - name: source
+    - name: gitops
+    - name: docker-config
+  tasks:
+
+    - name: clone
+      taskRef: { name: git-clone, kind: ClusterTask }
+      workspaces:
+        - { name: output, workspace: source }
+      params:
+        - { name: url,      value: $(params.git-url) }
+        - { name: revision, value: $(params.git-revision) }
+
+    - name: unit-test
+      runAfter: [clone]
+      taskRef: { name: maven, kind: ClusterTask }
+      workspaces:
+        - { name: source, workspace: source }
+      params:
+        - { name: GOALS, value: ["test"] }
+
+    - name: build-image
+      runAfter: [unit-test]
+      taskRef: { name: buildah, kind: ClusterTask }
+      workspaces:
+        - { name: source, workspace: source }
+        - { name: dockerconfig, workspace: docker-config }
+      params:
+        - { name: IMAGE,      value: $(params.image-name):$(tasks.clone.results.commit) }
+        - { name: DOCKERFILE, value: ./src/main/docker/Dockerfile.jvm }
+
+    - name: scan-image
+      runAfter: [build-image]
+      taskRef: { name: rhacs-image-scan, kind: ClusterTask }
+      params:
+        - { name: image,    value: $(params.image-name):$(tasks.clone.results.commit) }
+        - { name: severity, value: IMPORTANT }
+      # If a CRITICAL CVE is found, ACS task fails the PipelineRun → image never ships.
+
+    - name: sign-image
+      runAfter: [scan-image]
+      taskRef: { name: cosign-sign, kind: ClusterTask }
+      params:
+        - { name: image, value: $(params.image-name):$(tasks.clone.results.commit) }
+
+    - name: bump-gitops
+      runAfter: [sign-image]
+      taskRef: { name: git-update-deployment, kind: ClusterTask }
+      workspaces:
+        - { name: workspace, workspace: gitops }
+      params:
+        - { name: GIT_REPOSITORY, value: $(params.gitops-repo) }
+        - { name: NEW_IMAGE,      value: $(params.image-name) }
+        - { name: NEW_DIGEST,     value: $(tasks.clone.results.commit) }
+      # Argo CD picks up the change in seconds — humans never `oc apply`.
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: coolstore-build-listener
+  namespace: coolstore-cicd
+spec:
+  serviceAccountName: pipeline
+  triggers:
+    - name: github-push
+      bindings:
+        - { ref: github-push-binding }
+      template:
+        ref: coolstore-build-template

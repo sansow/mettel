@@ -1,0 +1,159 @@
+# =============================================================================
+# Postgres database — running as a VM on OpenShift Virtualization (KubeVirt).
+# This is the centerpiece of the "OpenShift runs every workload" narrative:
+#   - Same kubectl/oc, RBAC, network policy, observability as containers.
+#   - Live-migration on node drain. Snapshots via OADP. Same Git workflow.
+# Pattern lifted from rhpds/openshift-virt-roadshow-cnv and the upstream
+# kubevirt CDI quickstart, adapted to Postgres 15 on RHEL 9.
+# =============================================================================
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: coolstore-virt
+type: Opaque
+stringData:
+  POSTGRES_USER: coolstore
+  POSTGRES_PASSWORD: changeme-in-vault
+  POSTGRES_DB: coolstoredb
+---
+# DataVolume creates the disk by importing a RHEL 9 cloud image, then cloud-init
+# bootstraps Postgres on first boot. In production, swap the source for a
+# golden image baked by your image factory.
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: postgres-rhel9-disk
+  namespace: coolstore-virt
+spec:
+  source:
+    registry:
+      url: docker://registry.redhat.io/rhel9/rhel-guest-image:latest
+  storage:
+    accessModes: [ReadWriteOnce]
+    resources:
+      requests:
+        storage: 100Gi
+    storageClassName: ocs-storagecluster-ceph-rbd
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: postgres
+  namespace: coolstore-virt
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: coolstore
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+    - metadata:
+        name: postgres-rhel9-disk
+      spec:
+        source:
+          pvc:
+            namespace: coolstore-virt
+            name: postgres-rhel9-disk
+        storage:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 100Gi
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: postgres
+        kubevirt.io/size: medium
+        app.kubernetes.io/name: postgres
+    spec:
+      domain:
+        cpu:
+          cores: 4
+          sockets: 1
+          threads: 1
+        memory:
+          guest: 8Gi
+        devices:
+          disks:
+            - name: rootdisk
+              disk: { bus: virtio }
+            - name: cloudinitdisk
+              disk: { bus: virtio }
+          interfaces:
+            - name: default
+              masquerade: {}
+          networkInterfaceMultiqueue: true
+          rng: {}
+        machine:
+          type: pc-q35-rhel9.4.0
+        resources:
+          requests:
+            memory: 8Gi
+      networks:
+        - name: default
+          pod: {}
+      terminationGracePeriodSeconds: 180
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: postgres-rhel9-disk
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              package_update: true
+              packages:
+                - postgresql-server
+                - postgresql-contrib
+              runcmd:
+                - postgresql-setup --initdb
+                - sed -i "s/^#listen_addresses.*/listen_addresses = '*'/" /var/lib/pgsql/data/postgresql.conf
+                - echo "host all all 0.0.0.0/0 md5" >> /var/lib/pgsql/data/pg_hba.conf
+                - systemctl enable --now postgresql
+                - su - postgres -c "psql -c \"CREATE USER coolstore WITH PASSWORD 'changeme-in-vault';\""
+                - su - postgres -c "psql -c \"CREATE DATABASE coolstoredb OWNER coolstore;\""
+              ssh_authorized_keys:
+                - "ssh-ed25519 AAAA... demo@coolstore"
+---
+# Service makes the VM reachable from regular pods at postgres.coolstore-virt.svc:5432.
+# Notice: identical Service object you'd write for a container — the consumer
+# can't tell it's a VM.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: coolstore-virt
+  labels:
+    app.kubernetes.io/name: postgres
+spec:
+  selector:
+    kubevirt.io/domain: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+  type: ClusterIP
+---
+# NetworkPolicy: only the coolstore namespace's APIs can reach Postgres.
+# Same primitive as for containers — applies to VMs unchanged.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-coolstore-to-postgres
+  namespace: coolstore-virt
+spec:
+  podSelector:
+    matchLabels:
+      kubevirt.io/domain: postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: coolstore
+      ports:
+        - port: 5432
+          protocol: TCP

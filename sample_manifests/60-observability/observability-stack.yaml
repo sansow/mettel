@@ -1,0 +1,138 @@
+# =============================================================================
+# LGTM observability stack on OpenShift, driven by:
+#   - Cluster Observability Operator (COO) for the metrics MonitoringStack
+#   - Loki Operator for LokiStack (logs)
+#   - Tempo Operator for TempoStack (traces)
+# Sourced patterns: rhobs/observability-operator, openshift/cluster-logging-operator.
+# =============================================================================
+---
+# Object storage secret (for Loki + Tempo). Adjust to your provider.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lgtm-object-storage
+  namespace: coolstore-obs
+type: Opaque
+stringData:
+  bucketnames: coolstore-loki,coolstore-tempo
+  endpoint:    https://s3.example.com
+  access_key_id:     REPLACE
+  access_key_secret: REPLACE
+  region:      us-east-1
+---
+# Cluster Observability Operator: a focused metrics stack for our namespaces.
+apiVersion: monitoring.rhobs/v1alpha1
+kind: MonitoringStack
+metadata:
+  name: coolstore-metrics
+  namespace: coolstore-obs
+spec:
+  logLevel: info
+  retention: 15d
+  resources:
+    requests: { cpu: 200m, memory: 1Gi }
+  resourceSelector:
+    matchLabels:
+      monitoring.rhobs/stack: coolstore
+  prometheusConfig:
+    replicas: 2
+    persistentVolumeClaim:
+      resources:
+        requests: { storage: 50Gi }
+---
+# LokiStack — multi-tenant log backend.
+apiVersion: loki.grafana.com/v1
+kind: LokiStack
+metadata:
+  name: coolstore-logs
+  namespace: coolstore-obs
+spec:
+  size: 1x.small
+  storage:
+    schemas:
+      - { version: v13, effectiveDate: "2024-10-01" }
+    secret:
+      name: lgtm-object-storage
+      type: s3
+  storageClassName: gp3
+  tenants:
+    mode: openshift-logging
+---
+# TempoStack — distributed tracing backend.
+apiVersion: tempo.grafana.com/v1alpha1
+kind: TempoStack
+metadata:
+  name: coolstore-traces
+  namespace: coolstore-obs
+spec:
+  storage:
+    secret:
+      name: lgtm-object-storage
+      type: s3
+  storageSize: 50Gi
+  resources:
+    total: { limits: { cpu: "2", memory: 4Gi } }
+  template:
+    queryFrontend:
+      jaegerQuery:
+        enabled: true
+        ingress: { type: route }
+---
+# ServiceMonitor: scrape /q/metrics on every Quarkus service in coolstore.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: coolstore-services
+  namespace: coolstore-obs
+  labels:
+    monitoring.rhobs/stack: coolstore
+spec:
+  namespaceSelector:
+    matchNames: [coolstore]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: coolstore
+  endpoints:
+    - port: http
+      path: /q/metrics
+      interval: 30s
+---
+# PodMonitor for the Postgres VM — guest agent exposes metrics on 9187.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: postgres-vm
+  namespace: coolstore-obs
+  labels:
+    monitoring.rhobs/stack: coolstore
+spec:
+  namespaceSelector:
+    matchNames: [coolstore-virt]
+  selector:
+    matchLabels:
+      kubevirt.io/domain: postgres
+  podMetricsEndpoints:
+    - port: postgres-exporter
+      path: /metrics
+      interval: 30s
+---
+# Quick alert that a CTO could resonate with: cart latency above SLO.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: coolstore-slo
+  namespace: coolstore-obs
+  labels:
+    monitoring.rhobs/stack: coolstore
+spec:
+  groups:
+    - name: coolstore.slo
+      rules:
+        - alert: CartCheckoutLatencyHigh
+          expr: histogram_quantile(0.95,
+                  sum by (le) (rate(http_server_requests_seconds_bucket{namespace="coolstore",service="cart",uri="/cart/checkout"}[5m]))) > 0.8
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Cart checkout p95 above 800ms"
+            description: "User-facing latency degraded — investigate via Tempo trace search."

@@ -1,0 +1,56 @@
+# =============================================================================
+# Knative Services — the "scale to zero, scale on demand" workloads.
+# Order is invoked once per checkout; Recommend is invoked when product page
+# loads. Idle most of the day -> they cost nothing.
+# =============================================================================
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: order
+  namespace: coolstore
+  labels:
+    app.kubernetes.io/name: order
+    app.kubernetes.io/part-of: coolstore
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "20"
+        autoscaling.knative.dev/target: "50"   # 50 concurrent reqs/replica
+    spec:
+      containers:
+        - image: quay.io/coolstore/order:latest
+          ports: [{ containerPort: 8080 }]
+          env:
+            - { name: QUARKUS_DATASOURCE_JDBC_URL, value: "jdbc:postgresql://postgres.coolstore-virt.svc:5432/coolstoredb" }
+            - name: QUARKUS_DATASOURCE_USERNAME
+              valueFrom: { secretKeyRef: { name: postgres-app, key: username } }
+            - name: QUARKUS_DATASOURCE_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-app, key: password } }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 1,    memory: 512Mi }
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: recommend
+  namespace: coolstore
+  labels:
+    app.kubernetes.io/name: recommend
+    app.kubernetes.io/part-of: coolstore
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/min-scale: "0"
+        autoscaling.knative.dev/max-scale: "10"
+    spec:
+      containers:
+        - image: quay.io/coolstore/recommend:latest
+          ports: [{ containerPort: 8080 }]
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 256Mi }

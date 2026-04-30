@@ -1,0 +1,63 @@
+# =============================================================================
+# Argo CD AppProject + ApplicationSet — the "app of apps" that makes the
+# whole demo reproducible. Bootstrap with `oc apply -f` and walk away.
+#
+# Pattern: one ApplicationSet generates an Application per folder under
+# sample_manifests/, so the cluster mirrors Git exactly. Apply once.
+# =============================================================================
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: coolstore
+  namespace: openshift-gitops
+spec:
+  description: CoolStore retail demo — apps, Knative, VMs, observability
+  sourceRepos:
+    - 'https://github.com/<your-org>/coolstore-gitops.git'
+  destinations:
+    - { namespace: 'coolstore',        server: https://kubernetes.default.svc }
+    - { namespace: 'coolstore-cicd',   server: https://kubernetes.default.svc }
+    - { namespace: 'coolstore-virt',   server: https://kubernetes.default.svc }
+    - { namespace: 'coolstore-obs',    server: https://kubernetes.default.svc }
+    - { namespace: 'coolstore-policies', server: https://kubernetes.default.svc }
+  clusterResourceWhitelist:
+    - { group: '*', kind: '*' }
+  namespaceResourceWhitelist:
+    - { group: '*', kind: '*' }
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: coolstore
+  namespace: openshift-gitops
+spec:
+  generators:
+    - list:
+        elements:
+          - { folder: 10-namespaces,    namespace: default,            wave: "1" }
+          - { folder: 20-vm-postgres,   namespace: coolstore-virt,     wave: "2" }
+          - { folder: 60-observability, namespace: coolstore-obs,      wave: "3" }
+          - { folder: 30-pipelines,     namespace: coolstore-cicd,     wave: "4" }
+          - { folder: 40-apps,          namespace: coolstore,          wave: "5" }
+          - { folder: 50-knative,       namespace: coolstore,          wave: "5" }
+          - { folder: 70-acm-policies,  namespace: coolstore-policies, wave: "6" }
+  template:
+    metadata:
+      name: 'coolstore-{{folder}}'
+      annotations:
+        argocd.argoproj.io/sync-wave: '{{wave}}'
+    spec:
+      project: coolstore
+      source:
+        repoURL: https://github.com/<your-org>/coolstore-gitops.git
+        targetRevision: main
+        path: 'sample_manifests/{{folder}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{namespace}}'
+      syncPolicy:
+        automated: { prune: true, selfHeal: true }
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
