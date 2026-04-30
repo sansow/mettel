@@ -14,7 +14,7 @@ metadata:
 spec:
   description: CoolStore retail demo — apps, Knative, VMs, observability
   sourceRepos:
-    - 'https://github.com/<your-org>/coolstore-gitops.git'
+    - 'https://github.com/sansow/mettel.git'
   destinations:
     - { namespace: 'coolstore',        server: https://kubernetes.default.svc }
     - { namespace: 'coolstore-cicd',   server: https://kubernetes.default.svc }
@@ -50,7 +50,7 @@ spec:
     spec:
       project: coolstore
       source:
-        repoURL: https://github.com/<your-org>/coolstore-gitops.git
+        repoURL: https://github.com/sansow/mettel.git
         targetRevision: main
         path: 'sample_manifests/{{folder}}'
       destination:
