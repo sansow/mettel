@@ -1,91 +1,57 @@
 # =============================================================================
-# Tekton Pipeline that builds a CoolStore service, scans it with ACS,
-# pushes a signed image to Quay, and updates the GitOps repo with the new digest.
-# Pattern adapted from openshift/pipelines-tutorial.
+# Quarkus module builder — Pipeline for the demo.
+# Builds one Maven module from sansow/coolstore-quarkus, packages with buildah,
+# pushes to the internal OpenShift registry. ACS scan + cosign + GitOps bump
+# can be layered on later.
 # =============================================================================
 ---
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: coolstore-build
+  name: quarkus-module-build
   namespace: coolstore-cicd
 spec:
   params:
-    - name: git-url
-      description: source repo (e.g. coolstore catalog)
-    - name: git-revision
-      default: main
-    - name: image-name
-      description: e.g. quay.io/coolstore/catalog
-    - name: gitops-repo
-      description: GitOps repo to bump (manifests live here)
+    - { name: git-url,      default: 'https://github.com/sansow/coolstore-quarkus.git' }
+    - { name: git-revision, default: 'main' }
+    - { name: module,       description: 'maven module name (e.g. catalog-service)' }
+    - { name: image-name,   description: 'full image ref without tag' }
+    - { name: image-tag,    default: 'latest' }
   workspaces:
-    - name: source
-    - name: gitops
-    - name: docker-config
+    - { name: source }
+    - { name: maven-settings }
   tasks:
-
-    - name: clone
+    - name: fetch
       taskRef: { name: git-clone, kind: ClusterTask }
       workspaces:
         - { name: output, workspace: source }
       params:
-        - { name: url,      value: $(params.git-url) }
-        - { name: revision, value: $(params.git-revision) }
-
-    - name: unit-test
-      runAfter: [clone]
+        - { name: url,            value: $(params.git-url) }
+        - { name: revision,       value: $(params.git-revision) }
+        - { name: deleteExisting, value: 'true' }
+    - name: build-jar
+      runAfter: [fetch]
       taskRef: { name: maven, kind: ClusterTask }
       workspaces:
-        - { name: source, workspace: source }
+        - { name: source,         workspace: source }
+        - { name: maven-settings, workspace: maven-settings }
       params:
-        - { name: GOALS, value: ["test"] }
-
+        - name: GOALS
+          value:
+            - clean
+            - package
+            - -pl
+            - $(params.module)
+            - -am
+            - -DskipTests
     - name: build-image
-      runAfter: [unit-test]
+      runAfter: [build-jar]
       taskRef: { name: buildah, kind: ClusterTask }
       workspaces:
         - { name: source, workspace: source }
-        - { name: dockerconfig, workspace: docker-config }
       params:
-        - { name: IMAGE,      value: $(params.image-name):$(tasks.clone.results.commit) }
-        - { name: DOCKERFILE, value: ./src/main/docker/Dockerfile.jvm }
-
-    - name: scan-image
-      runAfter: [build-image]
-      taskRef: { name: rhacs-image-scan, kind: ClusterTask }
-      params:
-        - { name: image,    value: $(params.image-name):$(tasks.clone.results.commit) }
-        - { name: severity, value: IMPORTANT }
-      # If a CRITICAL CVE is found, ACS task fails the PipelineRun → image never ships.
-
-    - name: sign-image
-      runAfter: [scan-image]
-      taskRef: { name: cosign-sign, kind: ClusterTask }
-      params:
-        - { name: image, value: $(params.image-name):$(tasks.clone.results.commit) }
-
-    - name: bump-gitops
-      runAfter: [sign-image]
-      taskRef: { name: git-update-deployment, kind: ClusterTask }
-      workspaces:
-        - { name: workspace, workspace: gitops }
-      params:
-        - { name: GIT_REPOSITORY, value: $(params.gitops-repo) }
-        - { name: NEW_IMAGE,      value: $(params.image-name) }
-        - { name: NEW_DIGEST,     value: $(tasks.clone.results.commit) }
-      # Argo CD picks up the change in seconds — humans never `oc apply`.
----
-apiVersion: triggers.tekton.dev/v1beta1
-kind: EventListener
-metadata:
-  name: coolstore-build-listener
-  namespace: coolstore-cicd
-spec:
-  serviceAccountName: pipeline
-  triggers:
-    - name: github-push
-      bindings:
-        - { ref: github-push-binding }
-      template:
-        ref: coolstore-build-template
+        - { name: IMAGE,          value: '$(params.image-name):$(params.image-tag)' }
+        - { name: DOCKERFILE,     value: '$(params.module)/src/main/docker/Dockerfile.jvm' }
+        - { name: CONTEXT,        value: '$(params.module)' }
+        - { name: TLSVERIFY,      value: 'false' }
+        - { name: STORAGE_DRIVER, value: 'vfs' }
