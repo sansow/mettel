@@ -29,7 +29,7 @@ metadata:
 spec:
   source:
     registry:
-      url: docker://registry.redhat.io/rhel9/rhel-guest-image:latest
+      url: docker://quay.io/containerdisks/centos-stream:9
   storage:
     accessModes: [ReadWriteOnce]
     resources:
